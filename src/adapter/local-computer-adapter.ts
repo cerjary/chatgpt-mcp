@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { arch, hostname, platform, release, tmpdir, uptime } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { ChatGptMcpConfig } from '../config.js';
 import { adapterError, isComputerAdapterError } from '../errors.js';
 import { authorizePath, authorizePathRead, authorizePathEntryCreation, authorizePathEntryMutation, authorizeShellFilesystemMutation, authorizeShellFilesystemRead } from '../policy/filesystem.js';
@@ -45,6 +45,111 @@ interface ActiveScreenRecording {
 
 function requireCapability(enabled: boolean, operation: string, message: string): void {
   if (!enabled) throw adapterError('CAPABILITY_DISABLED', operation, message);
+}
+
+interface FileSafetyLocation {
+  configuredRoot: string;
+  workspaceRoot: string;
+  relativePath: string;
+  isWorkspaceRoot: boolean;
+  isMountsRoot: boolean;
+  isTrashPath: boolean;
+  trashParts: readonly string[];
+}
+
+function isWithinPath(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+function pathParts(relativePath: string): string[] {
+  return relativePath === '' ? [] : relativePath.split(sep).filter(Boolean);
+}
+
+function resolveFileSafetyLocation(path: string, configuredRoots: readonly string[]): FileSafetyLocation {
+  const normalizedPath = resolve(path);
+  const configuredRoot = configuredRoots
+    .map(root => resolve(root))
+    .filter(root => isWithinPath(root, normalizedPath))
+    .sort((left, right) => right.length - left.length)[0];
+
+  if (configuredRoot === undefined) {
+    throw adapterError('PATH_NOT_ALLOWED', 'filesystem.safety', 'Path is outside the configured filesystem roots.', { path: normalizedPath });
+  }
+
+  const rootRelative = relative(configuredRoot, normalizedPath);
+  const rootParts = pathParts(rootRelative);
+  const isMountsRoot = rootParts.length === 1 && rootParts[0] === 'mounts';
+
+  let workspaceRoot = configuredRoot;
+  let relativePath = rootRelative;
+  if (rootParts[0] === 'mounts' && rootParts.length >= 2) {
+    workspaceRoot = join(configuredRoot, 'mounts', rootParts[1]!);
+    relativePath = rootParts.slice(2).join(sep);
+  }
+
+  const trashParts = pathParts(relativePath);
+  return {
+    configuredRoot,
+    workspaceRoot,
+    relativePath,
+    isWorkspaceRoot: relativePath === '',
+    isMountsRoot,
+    isTrashPath: trashParts[0] === '.trash',
+    trashParts,
+  };
+}
+
+function trashTimestamp(now = new Date()): string {
+  const iso = now.toISOString();
+  return `${iso.slice(0, 10).replaceAll('-', '')}_${iso.slice(11, 19).replaceAll(':', '')}`;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function hardDeletePath(path: string, recursive: boolean): Promise<void> {
+  const metadata = await lstat(path);
+  if (metadata.isDirectory() && !metadata.isSymbolicLink()) {
+    if (recursive) await rm(path, { recursive: true, force: false });
+    else await rmdir(path);
+  } else {
+    await rm(path, { force: false });
+  }
+}
+
+function assertDeletableLivePath(location: FileSafetyLocation, operation: string, path: string): void {
+  if (location.isWorkspaceRoot || location.isMountsRoot) {
+    throw adapterError('PATH_NOT_ALLOWED', operation, 'Refusing to delete a configured filesystem root or mount root.', { path });
+  }
+}
+
+function assertTrashItem(location: FileSafetyLocation, operation: string, path: string, requireOriginalPath: boolean): void {
+  if (!location.isTrashPath || location.trashParts.length < (requireOriginalPath ? 3 : 2)) {
+    throw adapterError('PATH_NOT_ALLOWED', operation, 'This operation is only allowed for items inside a managed .trash directory.', { path });
+  }
+  const bucket = location.trashParts[1];
+  if (bucket === undefined || !/^\d{8}_\d{6}(?:_\d{2,})?$/.test(bucket)) {
+    throw adapterError('INVALID_INPUT', operation, 'Trash path does not contain a managed timestamp bucket.', { path });
+  }
+}
+
+async function chooseTrashDestination(location: FileSafetyLocation): Promise<string> {
+  const trashRoot = join(location.workspaceRoot, '.trash');
+  const stamp = trashTimestamp();
+  for (let attempt = 1; attempt <= 9999; attempt += 1) {
+    const bucket = attempt === 1 ? stamp : `${stamp}_${String(attempt).padStart(2, '0')}`;
+    const destination = join(trashRoot, bucket, location.relativePath);
+    if (!await pathExists(destination)) return destination;
+  }
+  throw adapterError('CONFLICT', 'fs.delete', 'Could not allocate a unique Trash destination.', { path: location.relativePath });
 }
 
 
@@ -247,21 +352,89 @@ export class LocalComputerAdapter implements ComputerAdapter {
     }
   }
 
-  async deletePath(requestedPath: string, recursive: boolean): Promise<void> {
+  async deletePath(requestedPath: string, _recursive: boolean): Promise<{ originalPath: string; trashPath: string; permanent: false }> {
     const operation = 'fs.delete';
     requireCapability(this.config.filesystem.write, operation, 'Filesystem writes are disabled.');
     try {
       const path = await authorizePath(requestedPath, this.config.filesystem.roots, operation);
-      await authorizePathEntryMutation(path, this.config.filesystem.blocklist, operation);
-      const metadata = await lstat(path);
-      if (metadata.isDirectory() && !metadata.isSymbolicLink()) {
-        if (recursive) await rm(path, { recursive: true, force: false });
-        else await rmdir(path);
-      } else {
-        await rm(path, { force: false });
+      const location = resolveFileSafetyLocation(path, this.config.filesystem.roots);
+      assertDeletableLivePath(location, operation, path);
+      if (location.isTrashPath) {
+        throw adapterError('INVALID_INPUT', operation, 'Path is already inside .trash; use fs.restore or fs.purge instead.', { path });
       }
+      await lstat(path);
+      await authorizePathEntryMutation(path, this.config.filesystem.blocklist, operation);
+
+      const trashPath = await chooseTrashDestination(location);
+      await authorizePath(trashPath, this.config.filesystem.roots, operation);
+      await authorizePathEntryCreation(trashPath, this.config.filesystem.blocklist, operation);
+      await mkdir(dirname(trashPath), { recursive: true });
+      await rename(path, trashPath);
+      return { originalPath: path, trashPath, permanent: false };
     } catch (error) {
-      mapOsError(error, operation, { path: requestedPath });
+      return mapOsError(error, operation, { path: requestedPath });
+    }
+  }
+
+  async restorePath(requestedTrashPath: string): Promise<{ trashPath: string; restoredPath: string }> {
+    const operation = 'fs.restore';
+    requireCapability(this.config.filesystem.write, operation, 'Filesystem writes are disabled.');
+    try {
+      const trashPath = await authorizePath(requestedTrashPath, this.config.filesystem.roots, operation);
+      const location = resolveFileSafetyLocation(trashPath, this.config.filesystem.roots);
+      assertTrashItem(location, operation, trashPath, true);
+      await lstat(trashPath);
+      await authorizePathEntryMutation(trashPath, this.config.filesystem.blocklist, operation);
+
+      const originalRelativePath = location.trashParts.slice(2).join(sep);
+      const restoredPath = join(location.workspaceRoot, originalRelativePath);
+      await authorizePath(restoredPath, this.config.filesystem.roots, operation);
+      await authorizePathEntryCreation(restoredPath, this.config.filesystem.blocklist, operation);
+      if (await pathExists(restoredPath)) {
+        throw adapterError('CONFLICT', operation, 'Restore destination already exists; refusing to overwrite it.', {
+          trashPath,
+          restoredPath,
+        });
+      }
+
+      await mkdir(dirname(restoredPath), { recursive: true });
+      await rename(trashPath, restoredPath);
+      return { trashPath, restoredPath };
+    } catch (error) {
+      return mapOsError(error, operation, { path: requestedTrashPath });
+    }
+  }
+
+  async purgePath(requestedPath: string, recursive: boolean): Promise<{ path: string; permanent: true }> {
+    const operation = 'fs.purge';
+    requireCapability(this.config.filesystem.write, operation, 'Filesystem writes are disabled.');
+    try {
+      const path = await authorizePath(requestedPath, this.config.filesystem.roots, operation);
+      const location = resolveFileSafetyLocation(path, this.config.filesystem.roots);
+      assertTrashItem(location, operation, path, false);
+      await authorizePathEntryMutation(path, this.config.filesystem.blocklist, operation);
+      await hardDeletePath(path, recursive);
+      return { path, permanent: true };
+    } catch (error) {
+      return mapOsError(error, operation, { path: requestedPath });
+    }
+  }
+
+  async xpurgePath(requestedPath: string, recursive: boolean, confirm: string): Promise<{ path: string; permanent: true }> {
+    const operation = 'fs.xpurge';
+    requireCapability(this.config.filesystem.write, operation, 'Filesystem writes are disabled.');
+    if (confirm !== 'PERMANENT_DELETE') {
+      throw adapterError('INVALID_INPUT', operation, 'confirm must be exactly PERMANENT_DELETE.');
+    }
+    try {
+      const path = await authorizePath(requestedPath, this.config.filesystem.roots, operation);
+      const location = resolveFileSafetyLocation(path, this.config.filesystem.roots);
+      assertDeletableLivePath(location, operation, path);
+      await authorizePathEntryMutation(path, this.config.filesystem.blocklist, operation);
+      await hardDeletePath(path, recursive);
+      return { path, permanent: true };
+    } catch (error) {
+      return mapOsError(error, operation, { path: requestedPath });
     }
   }
 

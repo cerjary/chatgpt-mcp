@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { lstat, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -85,6 +85,107 @@ test('filesystem lifecycle stays inside configured root', async () => {
     assert.equal(await readFile(moved, 'utf8'), 'one+two');
     await adapter.deletePath(moved, false);
     await adapter.deletePath(directory, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+
+test('file safety lifecycle soft-deletes, restores, purges Trash, and explicitly hard-deletes', async () => {
+  const { root, adapter } = await fixture();
+  try {
+    const file = join(root, 'safety.txt');
+    await adapter.writeFile(file, 'soft delete test', 'create');
+
+    const deleted = await adapter.deletePath(file, false);
+    assert.equal(deleted.originalPath, file);
+    assert.equal(deleted.permanent, false);
+    assert.match(deleted.trashPath, /[\\/]\.trash[\\/]\d{8}_\d{6}(?:_\d{2,})?[\\/]safety\.txt$/);
+    assert.equal(await readFile(deleted.trashPath, 'utf8'), 'soft delete test');
+    await assert.rejects(() => lstat(file), (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT');
+
+    const restored = await adapter.restorePath(deleted.trashPath);
+    assert.equal(restored.restoredPath, file);
+    assert.equal(await readFile(file, 'utf8'), 'soft delete test');
+
+    const deletedAgain = await adapter.deletePath(file, false);
+    const purged = await adapter.purgePath(deletedAgain.trashPath, false);
+    assert.equal(purged.permanent, true);
+    await assert.rejects(() => lstat(deletedAgain.trashPath), (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT');
+
+    const live = join(root, 'live.txt');
+    await adapter.writeFile(live, 'live', 'create');
+    await assert.rejects(
+      () => adapter.purgePath(live, false),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
+    await assert.rejects(
+      () => adapter.xpurgePath(live, false, 'WRONG'),
+      (error: unknown) => (error as { code?: string }).code === 'INVALID_INPUT',
+    );
+
+    const xpurged = await adapter.xpurgePath(live, false, 'PERMANENT_DELETE');
+    assert.equal(xpurged.permanent, true);
+    await assert.rejects(() => lstat(live), (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT');
+
+    await assert.rejects(
+      () => adapter.xpurgePath(root, true, 'PERMANENT_DELETE'),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('file safety moves non-empty directories as one entry and refuses restore overwrite', async () => {
+  const { root, adapter } = await fixture();
+  try {
+    const directory = join(root, 'tree');
+    const child = join(directory, 'child.txt');
+    await adapter.makeDirectory(directory, false);
+    await adapter.writeFile(child, 'child', 'create');
+
+    const deletedDirectory = await adapter.deletePath(directory, false);
+    assert.equal(await readFile(join(deletedDirectory.trashPath, 'child.txt'), 'utf8'), 'child');
+    await adapter.restorePath(deletedDirectory.trashPath);
+    assert.equal(await readFile(child, 'utf8'), 'child');
+
+    const file = join(root, 'collision.txt');
+    await adapter.writeFile(file, 'old', 'create');
+    const deletedFile = await adapter.deletePath(file, false);
+    await adapter.writeFile(file, 'new', 'create');
+
+    await assert.rejects(
+      () => adapter.restorePath(deletedFile.trashPath),
+      (error: unknown) => (error as { code?: string }).code === 'CONFLICT',
+    );
+    assert.equal(await readFile(file, 'utf8'), 'new');
+    assert.equal(await readFile(deletedFile.trashPath, 'utf8'), 'old');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('file safety keeps /mounts/<name> Trash inside that logical mount and protects its mount root', async () => {
+  const { root, adapter } = await fixture();
+  try {
+    const mountRoot = join(root, 'mounts', 'project-a');
+    const docs = join(mountRoot, 'docs');
+    const file = join(docs, 'report.txt');
+    await adapter.makeDirectory(docs, true);
+    await adapter.writeFile(file, 'report', 'create');
+
+    const deleted = await adapter.deletePath(file, false);
+    assert.equal(deleted.trashPath.startsWith(join(mountRoot, '.trash') + '/'), true);
+    assert.equal(await readFile(deleted.trashPath, 'utf8'), 'report');
+
+    await adapter.restorePath(deleted.trashPath);
+    assert.equal(await readFile(file, 'utf8'), 'report');
+
+    await assert.rejects(
+      () => adapter.xpurgePath(mountRoot, true, 'PERMANENT_DELETE'),
+      (error: unknown) => (error as { code?: string }).code === 'PATH_NOT_ALLOWED',
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

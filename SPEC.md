@@ -337,12 +337,53 @@ Both sides must be inside configured roots.
 
 #### `fs.delete`
 
-Delete a file or directory.
+Soft-delete a file or directory by moving it into the managed `.trash/` area in the same logical filesystem workspace.
+
+Input:
+
+- `path`;
+- optional `recursive` boolean retained for compatibility; soft deletion moves the target as one filesystem entry.
+
+Output:
+
+- `originalPath`;
+- `trashPath`;
+- `permanent: false`.
+
+For the local file-safety patch, paths beneath `<configured-root>/mounts/<name>/...` use `<configured-root>/mounts/<name>/.trash/`. Other paths use `<configured-root>/.trash/`.
+
+#### `fs.restore`
+
+Restore an item previously moved by `fs.delete`.
+
+Input:
+
+- `trashPath`.
+
+The Trash path must use a managed timestamp bucket. Restoration reconstructs the original relative path and refuses to overwrite an existing live destination.
+
+#### `fs.purge`
+
+Permanently remove content already inside managed Trash.
 
 Input:
 
 - `path`;
 - optional `recursive` boolean.
+
+Live paths outside managed Trash are rejected.
+
+#### `fs.xpurge`
+
+Explicit direct hard-delete escape hatch that bypasses Trash.
+
+Input:
+
+- `path`;
+- optional `recursive` boolean;
+- `confirm`, which must be exactly `PERMANENT_DELETE`.
+
+Configured filesystem roots and `mounts/<name>` mount roots are protected from this operation.
 
 #### `shell.exec`
 

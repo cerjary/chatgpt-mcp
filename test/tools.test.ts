@@ -15,7 +15,10 @@ function fakeAdapter(): ComputerAdapter {
     async writeFile() {},
     async makeDirectory() {},
     async movePath() {},
-    async deletePath() {},
+    async deletePath(path) { return { originalPath: path, trashPath: `/tmp/.trash/20260927_000000/${path.split('/').pop() ?? 'item'}`, permanent: false }; },
+    async restorePath(trashPath) { return { trashPath, restoredPath: '/tmp/restored' }; },
+    async purgePath(path) { return { path, permanent: true }; },
+    async xpurgePath(path) { return { path, permanent: true }; },
     async exec() { return { exitCode: 0, stdout: 'ok', stderr: '', durationMs: 1, timedOut: false }; },
     async listProcesses() { return [{ pid: 1, command: 'init' }]; },
     async killProcess() {},
@@ -128,8 +131,68 @@ test('tool discovery exposes the complete extended capability surface when grant
   try {
     const names = (await client.listTools()).tools.map(tool => tool.name).sort();
     assert.deepEqual(names, [
-      'app.close', 'app.launch', 'browser.open', 'fs.delete', 'fs.mkdir', 'fs.move', 'fs.write', 'input.click', 'input.key', 'input.move', 'input.type',
+      'app.close', 'app.launch', 'browser.open', 'fs.delete', 'fs.mkdir', 'fs.move', 'fs.purge', 'fs.restore', 'fs.write', 'fs.xpurge', 'input.click', 'input.key', 'input.move', 'input.type',
       'screen.capture', 'screen.record.start', 'screen.record.stop', 'service.control', 'service.status', 'system.info',
+    ]);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+
+test('file safety tools expose soft delete, restore, purge, and explicit hard delete contracts', async () => {
+  const calls: unknown[] = [];
+  const adapter = fakeAdapter();
+  adapter.deletePath = async (path, recursive) => {
+    calls.push(['delete', path, recursive]);
+    return { originalPath: path, trashPath: '/tmp/.trash/20260927_000000/a.txt', permanent: false };
+  };
+  adapter.restorePath = async trashPath => {
+    calls.push(['restore', trashPath]);
+    return { trashPath, restoredPath: '/tmp/a.txt' };
+  };
+  adapter.purgePath = async (path, recursive) => {
+    calls.push(['purge', path, recursive]);
+    return { path, permanent: true };
+  };
+  adapter.xpurgePath = async (path, recursive, confirm) => {
+    calls.push(['xpurge', path, recursive, confirm]);
+    return { path, permanent: true };
+  };
+
+  const { client, server } = await harness({ filesystem: { write: true, roots: ['/tmp'] } }, adapter);
+  try {
+    const deleted = await client.callTool({ name: 'fs.delete', arguments: { path: '/tmp/a.txt' } });
+    assert.deepEqual(deleted.structuredContent, {
+      originalPath: '/tmp/a.txt',
+      trashPath: '/tmp/.trash/20260927_000000/a.txt',
+      permanent: false,
+    });
+
+    const restored = await client.callTool({ name: 'fs.restore', arguments: { trashPath: '/tmp/.trash/20260927_000000/a.txt' } });
+    assert.deepEqual(restored.structuredContent, {
+      trashPath: '/tmp/.trash/20260927_000000/a.txt',
+      restoredPath: '/tmp/a.txt',
+    });
+
+    const purged = await client.callTool({ name: 'fs.purge', arguments: { path: '/tmp/.trash/20260927_000000/a.txt' } });
+    assert.deepEqual(purged.structuredContent, { path: '/tmp/.trash/20260927_000000/a.txt', permanent: true });
+
+    const badConfirm = await client.callTool({ name: 'fs.xpurge', arguments: { path: '/tmp/a.txt', confirm: 'YES' } });
+    assert.equal(badConfirm.isError, true);
+
+    const xpurged = await client.callTool({
+      name: 'fs.xpurge',
+      arguments: { path: '/tmp/a.txt', confirm: 'PERMANENT_DELETE' },
+    });
+    assert.deepEqual(xpurged.structuredContent, { path: '/tmp/a.txt', permanent: true });
+
+    assert.deepEqual(calls, [
+      ['delete', '/tmp/a.txt', false],
+      ['restore', '/tmp/.trash/20260927_000000/a.txt'],
+      ['purge', '/tmp/.trash/20260927_000000/a.txt', false],
+      ['xpurge', '/tmp/a.txt', false, 'PERMANENT_DELETE'],
     ]);
   } finally {
     await client.close();

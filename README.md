@@ -89,7 +89,10 @@ Every family except `system.info` is opt-in. Disabled capability families are om
 | `fs.write` | Create, overwrite, or append an allowed text file |
 | `fs.mkdir` | Create an allowed directory |
 | `fs.move` | Move/rename inside allowed roots |
-| `fs.delete` | Delete inside allowed roots |
+| `fs.delete` | Soft-delete into the managed `.trash/` in the same logical workspace |
+| `fs.restore` | Restore an item previously soft-deleted by `fs.delete` |
+| `fs.purge` | Permanently delete an item already inside managed Trash |
+| `fs.xpurge` | Explicit hard-delete escape hatch; bypasses Trash and requires `PERMANENT_DELETE` confirmation |
 | `shell.exec` | Spawn an allowed executable with an argument array |
 | `process.list` | List visible processes |
 | `process.kill` | Send a signal to a PID |
@@ -105,6 +108,19 @@ Every family except `system.info` is opt-in. Disabled capability families are om
 | `input.click` | Click the pointer on a caller-selected X11 `DISPLAY`; requires `desktop.hostDisplayAccess` |
 | `input.type` | Type literal text into the focused application on a caller-selected X11 `DISPLAY` |
 | `input.key` | Send a key sequence to the focused application on a caller-selected X11 `DISPLAY` |
+
+## Local file-safety behavior
+
+This branch changes the filesystem deletion contract so normal deletion is recoverable by default:
+
+- `fs.delete` moves a target into a managed `.trash/YYYYMMDD_HHMMSS/` bucket instead of permanently removing it.
+- paths under `<configured-root>/mounts/<name>/...` use `<configured-root>/mounts/<name>/.trash/`, keeping Trash on the same logical mount;
+- `fs.restore` restores the original relative path and refuses to overwrite an existing live destination;
+- `fs.purge` permanently removes only managed Trash content;
+- `fs.xpurge` is the explicit direct hard-delete escape hatch and requires `confirm: "PERMANENT_DELETE"`;
+- configured filesystem roots and `mounts/<name>` mount roots cannot be hard-deleted.
+
+These server-side rules do not depend on conversation memory or agent instructions.
 
 ## Requirements
 
