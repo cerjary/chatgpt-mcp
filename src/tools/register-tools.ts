@@ -299,16 +299,61 @@ export function registerTools(
     tools.registerTool(
       'fs.delete',
       {
-        title: 'Delete Path',
-        description: 'Use this to delete a file or directory inside the granted filesystem roots.',
+        title: 'Soft Delete Path',
+        description: 'Use this for normal deletion. It never permanently deletes the target; it moves the file or directory into the managed .trash directory in the same filesystem workspace so it can be restored later.',
         inputSchema: z.object({ path: pathInput, recursive: z.boolean().default(false) }),
-        outputSchema: z.object({ path: z.string(), recursive: z.boolean() }),
+        outputSchema: z.object({ originalPath: z.string(), trashPath: z.string(), permanent: z.literal(false) }),
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
       },
-      async ({ path, recursive }, ctx) => run('fs.delete', concurrency, requestSignal(ctx.mcpReq.signal), async () => {
-        await adapter.deletePath(path, recursive);
-        return { path, recursive };
-      }),
+      async ({ path, recursive }, ctx) => run('fs.delete', concurrency, requestSignal(ctx.mcpReq.signal), async () => (
+        adapter.deletePath(path, recursive)
+      )),
+    );
+
+    tools.registerTool(
+      'fs.restore',
+      {
+        title: 'Restore Soft-Deleted Path',
+        description: 'Restore a path previously moved into a managed .trash directory by fs.delete. Existing live destinations are never overwritten.',
+        inputSchema: z.object({ trashPath: pathInput }),
+        outputSchema: z.object({ trashPath: z.string(), restoredPath: z.string() }),
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      },
+      async ({ trashPath }, ctx) => run('fs.restore', concurrency, requestSignal(ctx.mcpReq.signal), async () => (
+        adapter.restorePath(trashPath)
+      )),
+    );
+
+    tools.registerTool(
+      'fs.purge',
+      {
+        title: 'Permanently Purge Trash Item',
+        description: 'Permanently delete an item that is already inside a managed .trash directory. This tool refuses live paths outside managed Trash.',
+        inputSchema: z.object({ path: pathInput, recursive: z.boolean().default(false) }),
+        outputSchema: z.object({ path: z.string(), permanent: z.literal(true) }),
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+      },
+      async ({ path, recursive }, ctx) => run('fs.purge', concurrency, requestSignal(ctx.mcpReq.signal), async () => (
+        adapter.purgePath(path, recursive)
+      )),
+    );
+
+    tools.registerTool(
+      'fs.xpurge',
+      {
+        title: 'Permanently Delete Live Path',
+        description: 'Dangerous escape hatch. Use only when the user explicitly requests permanent direct deletion without Trash. This permanently deletes a live file or directory, cannot target filesystem roots or mount roots, and requires confirm=PERMANENT_DELETE.',
+        inputSchema: z.object({
+          path: pathInput,
+          recursive: z.boolean().default(false),
+          confirm: z.literal('PERMANENT_DELETE'),
+        }),
+        outputSchema: z.object({ path: z.string(), permanent: z.literal(true) }),
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+      },
+      async ({ path, recursive, confirm }, ctx) => run('fs.xpurge', concurrency, requestSignal(ctx.mcpReq.signal), async () => (
+        adapter.xpurgePath(path, recursive, confirm)
+      )),
     );
   }
 
