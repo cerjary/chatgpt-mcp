@@ -90,7 +90,10 @@ export interface ComputerAdapter {
   replaceFile?(path: string, content: string, expectedSha256: string | null): Promise<{ sha256: string }>;
   makeDirectory(path: string, recursive: boolean): Promise<void>;
   movePath(source: string, destination: string): Promise<void>;
-  deletePath(path: string, recursive: boolean): Promise<void>;
+  deletePath(path: string, recursive: boolean): Promise<{ originalPath: string; trashPath: string; permanent: false }>;
+  restorePath(trashPath: string): Promise<{ trashPath: string; restoredPath: string }>;
+  purgePath(path: string, recursive: boolean): Promise<{ path: string; permanent: true }>;
+  xpurgePath(path: string, recursive: boolean, confirm: string): Promise<{ path: string; permanent: true }>;
   classifyExec?(request: ExecRequest): ShellExecutionClass;
   exec(request: ExecRequest): Promise<ExecResult>;
   executionMetrics?(): Record<string, unknown>;
