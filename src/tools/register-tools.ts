@@ -244,6 +244,30 @@ export function registerTools(
         return { path, content, bytes: Buffer.byteLength(content, 'utf8') };
       }),
     );
+
+    tools.registerTool(
+      'document.read',
+      {
+        title: 'Read Office/PDF Document',
+        description: 'Read DOCX, XLSX, PPTX, or PDF inside granted filesystem roots and convert the document to Markdown for language-model use. Use fs.read for plain UTF-8 text files.',
+        inputSchema: z.object({ path: pathInput, maxBytes: z.number().int().positive().optional() }),
+        outputSchema: z.object({
+          path: z.string(),
+          format: z.enum(['docx', 'xlsx', 'pptx', 'pdf']),
+          markdown: z.string(),
+          sourceBytes: z.number().int().nonnegative(),
+          outputBytes: z.number().int().nonnegative(),
+        }),
+        annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+      },
+      async ({ path, maxBytes }, ctx) => {
+        const signal = requestSignal(ctx.mcpReq.signal);
+        return run('document.read', concurrency, signal, async () => ({
+          path,
+          ...await adapter.readDocument(path, maxBytes, signal),
+        }));
+      },
+    );
   }
 
   if (config.filesystem.write && config.filesystem.roots.length > 0) {

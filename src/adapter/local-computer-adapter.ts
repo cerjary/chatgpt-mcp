@@ -1,9 +1,10 @@
 import { replaceUtf8 } from '../execution/atomic-file.js';
+import { OfficeParser } from 'officeparser';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises';
 import { arch, hostname, platform, release, tmpdir, uptime } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { ChatGptMcpConfig } from '../config.js';
 import { adapterError, isComputerAdapterError } from '../errors.js';
 import { authorizePath, authorizePathRead, authorizePathEntryCreation, authorizePathEntryMutation, authorizeShellFilesystemMutation, authorizeShellFilesystemRead } from '../policy/filesystem.js';
@@ -13,6 +14,7 @@ import { authorizeCommand, authorizeHostDisplaySafeInvocation, effectiveShellRun
 import type {
   ApplicationLaunchResult,
   ComputerAdapter,
+  DocumentReadResult,
   ExecRequest,
   ExecResult,
   FileEntry,
@@ -33,6 +35,8 @@ const MAX_APPLICATION_ARGS = 256;
 const MAX_APPLICATION_ARG_BYTES = 64 * 1024;
 const MAX_URL_BYTES = 16 * 1024;
 const MAX_RECORDING_STDERR_BYTES = 8 * 1024;
+const MAX_DOCUMENT_SOURCE_BYTES = 50 * 1024 * 1024;
+const SUPPORTED_DOCUMENT_EXTENSIONS = new Set(['.docx', '.xlsx', '.pptx', '.pdf']);
 
 interface ActiveScreenRecording {
   child: ChildProcess;
@@ -288,6 +292,73 @@ export class LocalComputerAdapter implements ComputerAdapter {
       return content.toString('utf8');
     } catch (error) {
       mapOsError(error, operation, { path: requestedPath });
+    }
+  }
+
+  async readDocument(requestedPath: string, maxBytes?: number, signal?: AbortSignal): Promise<DocumentReadResult> {
+    const operation = 'document.read';
+    requireCapability(this.config.filesystem.read, operation, 'Filesystem reads are disabled.');
+    if (maxBytes !== undefined && (!Number.isInteger(maxBytes) || maxBytes <= 0)) {
+      throw adapterError('INVALID_INPUT', operation, 'maxBytes must be a positive integer.');
+    }
+    const outputLimit = Math.min(maxBytes ?? this.config.filesystem.maxReadBytes, this.config.filesystem.maxReadBytes);
+
+    try {
+      const path = await authorizePathRead(requestedPath, this.config.filesystem.roots, this.config.filesystem.blocklist, operation);
+      const metadata = await stat(path);
+      if (!metadata.isFile()) throw adapterError('INVALID_INPUT', operation, 'Path is not a regular file.', { path });
+      if (metadata.size > MAX_DOCUMENT_SOURCE_BYTES) {
+        throw adapterError('OUTPUT_LIMIT', operation, 'Document exceeds the supported source-file byte limit.', {
+          path,
+          size: metadata.size,
+          maximum: MAX_DOCUMENT_SOURCE_BYTES,
+        });
+      }
+
+      const extension = extname(path).toLowerCase();
+      if (!SUPPORTED_DOCUMENT_EXTENSIONS.has(extension)) {
+        throw adapterError('INVALID_INPUT', operation, 'Unsupported document type. Supported types: DOCX, XLSX, PPTX, PDF.', {
+          path,
+          extension,
+        });
+      }
+      if (signal?.aborted) throw adapterError('CANCELLED', operation, 'Document read was cancelled.');
+
+      const ast = await OfficeParser.parseOffice(path, {
+        extractAttachments: false,
+        ocr: false,
+        ...(signal === undefined ? {} : { abortSignal: signal }),
+      });
+      const converted = await ast.to('md', { includeImages: false });
+      if (typeof converted.value !== 'string') {
+        throw adapterError('OS_ERROR', operation, 'Document parser returned a non-text result.', { path, extension });
+      }
+
+      const markdown = converted.value;
+      const outputBytes = Buffer.byteLength(markdown, 'utf8');
+      if (outputBytes > outputLimit) {
+        throw adapterError('OUTPUT_LIMIT', operation, 'Parsed document exceeds the configured output byte limit.', {
+          path,
+          size: outputBytes,
+          maximum: outputLimit,
+        });
+      }
+
+      return {
+        format: extension.slice(1) as DocumentReadResult['format'],
+        markdown,
+        sourceBytes: metadata.size,
+        outputBytes,
+      };
+    } catch (error) {
+      if (isComputerAdapterError(error)) throw error;
+      if ((error as { name?: string }).name === 'AbortError') {
+        throw adapterError('CANCELLED', operation, 'Document read was cancelled.', { path: requestedPath });
+      }
+      throw adapterError('INVALID_INPUT', operation, 'Document parsing failed.', {
+        path: requestedPath,
+        parserMessage: error instanceof Error ? error.message.slice(0, 2048) : String(error).slice(0, 2048),
+      });
     }
   }
 

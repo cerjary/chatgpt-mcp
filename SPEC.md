@@ -303,6 +303,27 @@ Input:
 
 The implementation must reject files outside configured roots and must cap response size.
 
+#### `document.read`
+
+Read a supported Office/PDF document and return model-oriented Markdown.
+
+Input:
+
+- `path`;
+- optional output byte limit.
+
+Supported formats are DOCX, XLSX, PPTX, and PDF. The implementation must apply the same configured-root and read-blocklist authorization used for filesystem reads before parsing. Source documents are bounded independently from extracted output, and extracted Markdown is bounded by the configured filesystem read/output limit.
+
+The initial implementation is text-oriented: OCR is disabled and embedded images are not returned. Image-only or scanned documents may therefore yield little or no body text.
+
+Output:
+
+- `path`;
+- detected `format`;
+- extracted `markdown`;
+- `sourceBytes`;
+- `outputBytes`.
+
 #### `fs.write`
 
 Write a UTF-8 text file.

@@ -86,6 +86,7 @@ Every family except `system.info` is opt-in. Disabled capability families are om
 | `system.info` | Host/runtime information and granted capability summary |
 | `fs.list` | List an allowed directory |
 | `fs.read` | Read an allowed UTF-8 text file |
+| `document.read` | Convert an allowed DOCX, XLSX, PPTX, or PDF document to Markdown |
 | `fs.write` | Create, overwrite, or append an allowed text file |
 | `fs.mkdir` | Create an allowed directory |
 | `fs.move` | Move/rename inside allowed roots |
@@ -121,6 +122,19 @@ This branch changes the filesystem deletion contract so normal deletion is recov
 - configured filesystem roots and `mounts/<name>` mount roots cannot be hard-deleted.
 
 These server-side rules do not depend on conversation memory or agent instructions.
+
+## Document reading
+
+`document.read` is a read-only document extraction tool for files already inside granted filesystem roots. It uses the same filesystem read authorization and blocklist checks as `fs.read`, then converts supported documents to Markdown for model consumption.
+
+Supported formats in this patch:
+
+- DOCX;
+- XLSX;
+- PPTX;
+- PDF.
+
+The parser does not enable OCR or return embedded images in the first version. Text-based Office documents and PDFs are supported; scanned/image-only content may produce little or no body text. Source documents are capped at 50 MiB, and extracted Markdown remains subject to the configured filesystem read/output limits. Plain UTF-8 files should continue to use `fs.read`.
 
 ## Requirements
 
