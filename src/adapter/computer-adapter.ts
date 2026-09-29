@@ -7,6 +7,15 @@ export interface FileEntry {
   modifiedAt?: string;
 }
 
+export type DocumentFormat = 'docx' | 'xlsx' | 'pptx' | 'pdf';
+
+export interface DocumentReadResult {
+  format: DocumentFormat;
+  markdown: string;
+  sourceBytes: number;
+  outputBytes: number;
+}
+
 export interface SystemInfo {
   hostname: string;
   platform: string;
@@ -86,6 +95,7 @@ export interface ComputerAdapter {
   systemInfo(): Promise<SystemInfo>;
   listDirectory(path: string): Promise<readonly FileEntry[]>;
   readFile(path: string, maxBytes?: number): Promise<string>;
+  readDocument(path: string, maxBytes?: number, signal?: AbortSignal): Promise<DocumentReadResult>;
   writeFile(path: string, content: string, mode: 'create' | 'overwrite' | 'append'): Promise<void>;
   replaceFile?(path: string, content: string, expectedSha256: string | null): Promise<{ sha256: string }>;
   makeDirectory(path: string, recursive: boolean): Promise<void>;
