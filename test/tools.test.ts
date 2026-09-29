@@ -12,6 +12,7 @@ function fakeAdapter(): ComputerAdapter {
     async systemInfo() { return { hostname: 'test', platform: 'linux', architecture: 'x64', release: '1', uptimeSeconds: 1, cwd: '/tmp' }; },
     async listDirectory() { return [{ name: 'a.txt', type: 'file', size: 1 }]; },
     async readFile() { return 'a'; },
+    async readDocument() { return { format: 'docx', markdown: '# Test', sourceBytes: 128, outputBytes: 6 }; },
     async writeFile() {},
     async makeDirectory() {},
     async movePath() {},
@@ -67,7 +68,36 @@ test('tool discovery exposes only granted capability families', async () => {
   });
   try {
     const names = (await client.listTools()).tools.map(tool => tool.name).sort();
-    assert.deepEqual(names, ['fs.list', 'fs.read', 'process.list', 'shell.exec', 'system.info']);
+    assert.deepEqual(names, ['document.read', 'fs.list', 'fs.read', 'process.list', 'shell.exec', 'system.info']);
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+
+test('document.read delegates supported document extraction and returns Markdown metadata', async () => {
+  const adapter = fakeAdapter();
+  const calls: unknown[] = [];
+  adapter.readDocument = async (path, maxBytes, signal) => {
+    calls.push([path, maxBytes, signal instanceof AbortSignal]);
+    return { format: 'docx', markdown: '# Parsed\n\nHello', sourceBytes: 2048, outputBytes: 15 };
+  };
+  const { client, server } = await harness({ filesystem: { read: true, roots: ['/tmp'] } }, adapter);
+  try {
+    const result = await client.callTool({
+      name: 'document.read',
+      arguments: { path: '/tmp/report.docx', maxBytes: 4096 },
+    });
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(result.structuredContent, {
+      path: '/tmp/report.docx',
+      format: 'docx',
+      markdown: '# Parsed\n\nHello',
+      sourceBytes: 2048,
+      outputBytes: 15,
+    });
+    assert.deepEqual(calls, [['/tmp/report.docx', 4096, true]]);
   } finally {
     await client.close();
     await server.close();
