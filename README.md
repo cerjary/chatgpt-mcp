@@ -525,3 +525,9 @@ GitHub Actions runs the same TypeScript gate, Python recovery/deployment fault t
 Remote workspace configuration may define `prepareCommands` as trusted executable-plus-argument arrays. They default to empty and run inside the isolated pod after snapshot/parity checks. Each preparation command may include `whenFiles`, a list of relative workspace paths that must all exist before that command runs. This lets deployments restore project dependencies only for matching workspaces, without shell interpretation, path traversal, or changing public local-only defaults.
 
 The optional Kubernetes backend also exposes `idleCommand` as a deployment configuration array (default `['sleep', 'infinity']`). Deployments that require an init/reaper process may configure an explicit argument array such as `['/usr/bin/tini', '--', 'sleep', 'infinity']`; no shell interpolation is used.
+
+### Core Access Trace v2
+
+`CHATGPT_MCP_TRACE=1` emits compatible `tool_*` JSONL lifecycle events. Explicitly opt into requested paths, move endpoints, cwd and derived mount namespaces with `CHATGPT_MCP_TRACE_PATHS=1` (default off). Content, commands, arguments, environment values and tool output are never audit fields. Every invocation has a unique requestId; cwd is only a working directory.
+
+The [final Console contract and fixtures](docs/specs/ACCESS-TRACE-V2.md) define nullable fields, success/error semantics and v1 compatibility. [Trusted ingress deployment and rollback](docs/specs/TRUSTED-INGRESS-DEPLOYMENT.md) describes the optional `CHATGPT_MCP_INGRESS_CONFIG` mTLS listener: distinct pinned client certificates identify Personal/SOOCKER **routes**. HTTP/stdio and unverified input remain Unknown. Existing tool permissions and HTTP authentication are unchanged. Enabling this in a live installation requires coordinated operator deployment; this feature does not reconfigure or restart tunnels automatically.

@@ -1,0 +1,27 @@
+# Documentation ONLY, not a deployable Compose file. Apply these additions to the
+# existing private Compose, retaining all other flags/auth/health/limits/mounts.
+core:
+  environment:
+    CHATGPT_MCP_TRACE: '1'
+    CHATGPT_MCP_TRACE_PATHS: '1' # Explicit operator opt-in to private path logging.
+    CHATGPT_MCP_INGRESS_CONFIG: /run/mcp-ingress/config.json
+  read_only_mounts:
+    - SERVER_MATERIAL_AND_PIN_CONFIG_ONLY:/run/mcp-ingress
+personal_tunnel:
+  network_mode: service:chatgpt-mcp
+  mcp_target: https://127.0.0.1:3321/mcp
+  append_flags:
+    - --mcp.client-cert=/run/route-identity/client.crt
+    - --mcp.client-key=/run/route-identity/client.key
+    - --ca-bundle=/run/route-identity/server-ca.crt
+  read_only_mounts:
+    - PERSONAL_CLIENT_KEY_CERT_AND_SERVER_CA_ONLY:/run/route-identity
+soocker_tunnel:
+  network_mode: service:chatgpt-mcp
+  mcp_target: https://127.0.0.1:3321/mcp
+  append_flags:
+    - --mcp.client-cert=/run/route-identity/client.crt
+    - --mcp.client-key=/run/route-identity/client.key
+    - --ca-bundle=/run/route-identity/server-ca.crt
+  read_only_mounts:
+    - SOOCKER_CLIENT_KEY_CERT_AND_SERVER_CA_ONLY:/run/route-identity

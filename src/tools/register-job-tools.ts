@@ -1,6 +1,7 @@
+import { beginToolAudit, type AuditMetadata } from '../audit.js';
 import { requestSignal } from '../diagnostics.js';
 import type { CallToolResult, McpServer } from '@modelcontextprotocol/server';
-import { diagnosticId, errorCategory, trace } from '../diagnostics.js';
+import { diagnosticId, errorCategory, withDiagnosticTool } from '../diagnostics.js';
 import type { ConcurrencyController } from '../concurrency.js';
 import * as z from 'zod/v4';
 import type { ChatGptMcpConfig } from '../config.js';
@@ -10,19 +11,19 @@ import { jobStore } from '../execution/job-store.js';
 export function registerJobTools(server: Pick<McpServer, 'registerTool'>, config: Readonly<ChatGptMcpConfig>, concurrency: ConcurrencyController): void {
   if (!config.jobs.enabled || !config.shell.enabled) return;
   const store = jobStore(config);
-  const invoke = async (operation: string, signal: AbortSignal, fn: () => Promise<unknown>): Promise<CallToolResult> => {
+  const invoke = async (operation: string, signal: AbortSignal, fn: () => Promise<unknown>, metadata?: AuditMetadata): Promise<CallToolResult> => withDiagnosticTool(async () => {
     const id = diagnosticId();
-    trace('tool_received', { requestId: id, operation });
+    const audit = beginToolAudit(operation, metadata);
     try {
-      const result = await concurrency.run(operation, fn, signal);
-      trace('tool_completed', { requestId: id, operation });
+      const result = await concurrency.run(operation, () => { audit.started(); return fn(); }, signal);
+      audit.completed();
       return { content: [{ type: 'text', text: 'ok' }], structuredContent: result as Record<string, unknown> };
     } catch (error) {
       const body = isComputerAdapterError(error) ? error : { code: 'OS_ERROR', operation: 'exec.job', message: 'Job storage operation failed; inspect the operation identifier before submitting new work.' };
-      trace('tool_failed', { requestId: id, operation, code: body.code });
+      audit.failed(body.code);
       return { content: [{ type: 'text', text: JSON.stringify({ error: { ...body, category: errorCategory(body.code), diagnosticId: id, retryable: body.code === 'OVERLOADED' } }) }], isError: true };
     }
-  };
+  });
   const jobId = z.string().regex(/^[a-f0-9]{64}$/);
   server.registerTool('exec.start', {
     title: 'Start Durable Command',
@@ -33,7 +34,7 @@ export function registerJobTools(server: Pick<McpServer, 'registerTool'>, config
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
   }, async ({ operationId, command, args, cwd, env, timeoutMs }, ctx) => invoke('exec.start', requestSignal(ctx.mcpReq.signal), () => store.start(operationId, {
     command, args, ...(cwd === undefined ? {} : { cwd }), ...(env === undefined ? {} : { env }), ...(timeoutMs === undefined ? {} : { timeoutMs }),
-  })));
+  }), cwd === undefined ? {} : { cwd }));
   server.registerTool('exec.status', {
     title: 'Durable Command Status', description: 'Retrieve a durable job without repeating its command. unknown means the outcome needs reconciliation, not that permissions changed.',
     inputSchema: z.object({ jobId }), annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },

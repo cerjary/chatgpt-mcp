@@ -1,3 +1,5 @@
+import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
+import { loadTrustedIngress, type TrustedIngress } from './trusted-ingress.js';
 import { readFileSync } from 'node:fs';
 import { instanceId, equalSecret, routingAbi, jobsAbi, policyFingerprint } from './hotswap/identity.js';
 import { runtimeIdentity } from './diagnostics.js';
@@ -25,6 +27,7 @@ const HTTP_SHUTDOWN_GRACE_MS = 2_000;
 export interface RunningHttpServer {
   server: NodeHttpServer;
   endpoint: string;
+  ingressEndpoint?: string;
   close(): Promise<void>;
 }
 
@@ -93,7 +96,8 @@ export function createComputerHttpServer(
   config: Readonly<ChatGptMcpConfig>,
   adapter: ComputerAdapter = new RoutingComputerAdapter(config),
   concurrency: ConcurrencyController = new ConcurrencyController(config.concurrency, config.execution.kubernetes.maxConcurrent),
-): { server: NodeHttpServer; closeHandler(): Promise<void> } {
+  ingress: TrustedIngress | undefined = loadTrustedIngress(),
+): { server: NodeHttpServer; ingressServer?: HttpsServer; closeHandler(): Promise<void> } {
   const handler = createMcpHandler(createComputerMcpServerFactory(config, adapter, concurrency), {
     legacy: 'stateless',
     responseMode: 'json',
@@ -105,7 +109,7 @@ export function createComputerHttpServer(
   let fenced = false;
   let exchanges = 0;
 
-  const server = createServer((req, res) => {
+  const handleRequest = (req: IncomingMessage, res: ServerResponse, ingressSource: 'Personal' | 'SOOCKER' | null) => {
     if (!validate.host(req, res) || !validate.origin(req, res)) return;
 
     const pathname = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname;
@@ -198,19 +202,38 @@ export function createComputerHttpServer(
         req.socket.off('close', disconnect);
         exchanges -= 1;
       });
-    }, transportAbort.signal);
-  });
-
-  return { server, closeHandler: handler.close };
+    }, transportAbort.signal, ingressSource);
+  };
+  const server = createServer((req, res) => handleRequest(req, res, null));
+  const ingressServer = ingress ? createHttpsServer(ingress.tls, (req, res) => {
+    const source = ingress.identify(req);
+    if (!source) { writeJson(res, 403, { error: 'unrecognized_ingress_certificate' }); return; }
+    handleRequest(req, res, source);
+  }) : undefined;
+  return { server, ...(ingressServer ? { ingressServer } : {}), closeHandler: handler.close };
 }
 
 export async function startComputerHttpServer(
   config: Readonly<ChatGptMcpConfig>,
   adapter: ComputerAdapter = new RoutingComputerAdapter(config),
 ): Promise<RunningHttpServer> {
-  const { server, closeHandler } = createComputerHttpServer(config, adapter);
-  server.listen(config.http.port, config.http.host);
-  await once(server, 'listening');
+  const ingress = loadTrustedIngress();
+  const { server, ingressServer, closeHandler } = createComputerHttpServer(config, adapter, undefined, ingress);
+  const servers = ingressServer ? [server, ingressServer] : [server];
+  try {
+    server.listen(config.http.port, config.http.host);
+    await once(server, 'listening');
+    if (ingressServer && ingress) {
+      ingressServer.listen(ingress.port, ingress.host);
+      await once(ingressServer, 'listening');
+    }
+  } catch (error) {
+    await Promise.all(servers.filter(item => item.listening).map(item => new Promise<void>(resolve => {
+      item.close(() => resolve()); item.closeAllConnections();
+    })));
+    await closeHandler();
+    throw error;
+  }
 
   const address = server.address();
   if (address === null || typeof address === 'string') {
@@ -223,14 +246,15 @@ export async function startComputerHttpServer(
   return {
     server,
     endpoint,
+    ...(ingress ? { ingressEndpoint: `https://${hostForUrl(ingress.host)}:${ingress.port}/mcp` } : {}),
     async close(): Promise<void> {
       if (closed) return;
       closed = true;
-      const serverClosed = new Promise<void>((resolve, reject) => {
-        server.close(error => error ? reject(error) : resolve());
-      });
-      server.closeIdleConnections();
-      const forceTimer = setTimeout(() => server.closeAllConnections(), HTTP_SHUTDOWN_GRACE_MS);
+      const serverClosed = Promise.all(servers.map(item => new Promise<void>((resolve, reject) => {
+        item.close(error => error ? reject(error) : resolve());
+        item.closeIdleConnections();
+      })));
+      const forceTimer = setTimeout(() => servers.forEach(item => item.closeAllConnections()), HTTP_SHUTDOWN_GRACE_MS);
       forceTimer.unref();
       try {
         await Promise.all([serverClosed, closeHandler()]);

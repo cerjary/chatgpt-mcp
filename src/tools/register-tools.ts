@@ -1,5 +1,6 @@
+import { beginToolAudit, type AuditMetadata } from '../audit.js';
 import { requestSignal } from '../diagnostics.js';
-import { diagnosticId, errorCategory, runtimeIdentity, trace } from '../diagnostics.js';
+import { diagnosticId, errorCategory, runtimeIdentity, withDiagnosticTool } from '../diagnostics.js';
 import { registerJobTools } from './register-job-tools.js';
 import { McpServer, type CallToolResult } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
@@ -86,22 +87,24 @@ async function run(
   fn: () => Promise<Record<string, unknown>>,
   message?: (result: Record<string, unknown>) => string,
   admissionOverride?: AdmissionClass | (() => AdmissionClass),
+  auditMetadata?: AuditMetadata,
 ): Promise<CallToolResult> {
-  const id = diagnosticId();
-  const started = performance.now();
-  trace('tool_received', { requestId: id, operation });
-  try {
-    const admission = typeof admissionOverride === 'function' ? admissionOverride() : admissionOverride;
-    const result = await concurrency.run(operation, async () => {
-      trace('tool_started', { requestId: id, operation });
-      return fn();
-    }, signal, admission);
-    trace('tool_completed', { requestId: id, operation, elapsedMs: Math.round(performance.now() - started) });
-    return enforceTransportBudget(success(result, message?.(result)), operation);
-  } catch (error) {
-    trace('tool_failed', { requestId: id, operation, code: isComputerAdapterError(error) ? error.code : 'OS_ERROR', elapsedMs: Math.round(performance.now() - started) });
-    return failure(error, operation);
-  }
+  return withDiagnosticTool(async () => {
+    const audit = beginToolAudit(operation, auditMetadata);
+    try {
+      const admission = typeof admissionOverride === 'function' ? admissionOverride() : admissionOverride;
+      const result = await concurrency.run(operation, async () => {
+        audit.started();
+        return fn();
+      }, signal, admission);
+      const response = enforceTransportBudget(success(result, message?.(result)), operation);
+      if (response.isError) audit.failed('OUTPUT_LIMIT'); else audit.completed();
+      return response;
+    } catch (error) {
+      audit.failed(isComputerAdapterError(error) ? error.code : 'OS_ERROR');
+      return failure(error, operation);
+    }
+  });
 }
 
 export function registerTools(
@@ -225,7 +228,7 @@ export function registerTools(
         outputSchema: z.object({ path: z.string(), entries: z.array(fileEntrySchema) }),
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
       },
-      async ({ path }, ctx) => run('fs.list', concurrency, requestSignal(ctx.mcpReq.signal), async () => ({ path, entries: [...await adapter.listDirectory(path)] })),
+      async ({ path }, ctx) => run('fs.list', concurrency, requestSignal(ctx.mcpReq.signal), async () => ({ path, entries: [...await adapter.listDirectory(path)] }), undefined, undefined, { path }),
     );
 
     tools.registerTool(
@@ -242,7 +245,7 @@ export function registerTools(
       async ({ path, maxBytes }, ctx) => run('fs.read', concurrency, requestSignal(ctx.mcpReq.signal), async () => {
         const content = await adapter.readFile(path, maxBytes);
         return { path, content, bytes: Buffer.byteLength(content, 'utf8') };
-      }),
+      }, undefined, undefined, { path }),
     );
 
     tools.registerTool(
@@ -265,7 +268,7 @@ export function registerTools(
         return run('document.read', concurrency, signal, async () => ({
           path,
           ...await adapter.readDocument(path, maxBytes, signal),
-        }));
+        }), undefined, undefined, { path });
       },
     );
   }
@@ -287,7 +290,7 @@ export function registerTools(
       async ({ path, content, mode }, ctx) => run('fs.write', concurrency, requestSignal(ctx.mcpReq.signal), async () => {
         await adapter.writeFile(path, content, mode);
         return { path, mode, bytes: Buffer.byteLength(content, 'utf8') };
-      }),
+      }, undefined, undefined, { path }),
     );
 
     tools.registerTool(
@@ -302,7 +305,7 @@ export function registerTools(
       async ({ path, recursive }, ctx) => run('fs.mkdir', concurrency, requestSignal(ctx.mcpReq.signal), async () => {
         await adapter.makeDirectory(path, recursive);
         return { path, recursive };
-      }),
+      }, undefined, undefined, { path }),
     );
 
     tools.registerTool(
@@ -317,7 +320,7 @@ export function registerTools(
       async ({ source, destination }, ctx) => run('fs.move', concurrency, requestSignal(ctx.mcpReq.signal), async () => {
         await adapter.movePath(source, destination);
         return { source, destination };
-      }),
+      }, undefined, undefined, { sourcePath: source, destinationPath: destination }),
     );
 
     tools.registerTool(
@@ -331,7 +334,7 @@ export function registerTools(
       },
       async ({ path, recursive }, ctx) => run('fs.delete', concurrency, requestSignal(ctx.mcpReq.signal), async () => (
         adapter.deletePath(path, recursive)
-      )),
+      ), undefined, undefined, { path }),
     );
 
     tools.registerTool(
@@ -345,7 +348,7 @@ export function registerTools(
       },
       async ({ trashPath }, ctx) => run('fs.restore', concurrency, requestSignal(ctx.mcpReq.signal), async () => (
         adapter.restorePath(trashPath)
-      )),
+      ), undefined, undefined, { path: trashPath }),
     );
 
     tools.registerTool(
@@ -359,7 +362,7 @@ export function registerTools(
       },
       async ({ path, recursive }, ctx) => run('fs.purge', concurrency, requestSignal(ctx.mcpReq.signal), async () => (
         adapter.purgePath(path, recursive)
-      )),
+      ), undefined, undefined, { path }),
     );
 
     tools.registerTool(
@@ -377,7 +380,7 @@ export function registerTools(
       },
       async ({ path, recursive, confirm }, ctx) => run('fs.xpurge', concurrency, requestSignal(ctx.mcpReq.signal), async () => (
         adapter.xpurgePath(path, recursive, confirm)
-      )),
+      ), undefined, undefined, { path }),
     );
   }
 
@@ -388,7 +391,7 @@ export function registerTools(
       inputSchema: z.object({ path: pathInput, content: z.string(), expectedSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable() }),
       outputSchema: z.object({ path: z.string(), sha256: z.string() }),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
-    }, async ({ path, content, expectedSha256 }, ctx) => run('fs.replace', concurrency, requestSignal(ctx.mcpReq.signal), async () => ({ path, ...await adapter.replaceFile!(path, content, expectedSha256) })));
+    }, async ({ path, content, expectedSha256 }, ctx) => run('fs.replace', concurrency, requestSignal(ctx.mcpReq.signal), async () => ({ path, ...await adapter.replaceFile!(path, content, expectedSha256) }), undefined, undefined, { path }));
   }
 
   registerJobTools(tools, config, concurrency);
@@ -429,6 +432,7 @@ export function registerTools(
           async () => ({ ...await adapter.exec(request) }),
           undefined,
           () => adapter.classifyExec?.(request) ?? 'shell-local',
+          args.cwd === undefined ? {} : { cwd: args.cwd },
         );
       },
     );
@@ -550,20 +554,24 @@ export function registerTools(
         outputSchema: z.object({ mimeType: z.literal('image/png'), bytes: z.number().int().nonnegative(), display: z.string() }),
         annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: false },
       },
-      async ({ display }, ctx): Promise<CallToolResult> => {
+      async ({ display }, ctx): Promise<CallToolResult> => withDiagnosticTool(async () => {
+        const audit = beginToolAudit('screen.capture');
         try {
-          const capture = await concurrency.run('screen.capture', () => adapter.captureScreen(display), requestSignal(ctx.mcpReq.signal));
-          return enforceTransportBudget({
+          const capture = await concurrency.run('screen.capture', () => { audit.started(); return adapter.captureScreen(display); }, requestSignal(ctx.mcpReq.signal));
+          const response = enforceTransportBudget({
             content: [
               { type: 'text', text: JSON.stringify({ mimeType: capture.mimeType, bytes: capture.bytes, display }) },
               { type: 'image', data: capture.data, mimeType: capture.mimeType },
             ],
             structuredContent: { mimeType: capture.mimeType, bytes: capture.bytes, display },
           }, 'screen.capture');
+          if (response.isError) audit.failed('OUTPUT_LIMIT'); else audit.completed();
+          return response;
         } catch (error) {
+          audit.failed(isComputerAdapterError(error) ? error.code : 'OS_ERROR');
           return failure(error, 'screen.capture');
         }
-      },
+      }),
     );
   }
 
