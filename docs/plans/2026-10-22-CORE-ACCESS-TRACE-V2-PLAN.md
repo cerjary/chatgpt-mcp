@@ -1,5 +1,25 @@
 # chatgpt-mcp Core — Access Trace v2 / Codex Implementation Brief
 
+## 2026-10-22 Delivery decision — Core/Console split; complete Core in ONE handoff
+
+**This section overrides the earlier phased delivery / Phase A-only instruction below.**
+
+The owner wants **one complete Core development delivery** by Codex. ChatGPT independently owns the companion **MCP Console** Web parser, history and UI. Codex should therefore complete ALL Core-owned requirements together on `feat/core-access-trace-v2`, not submit Phase A and stop:
+
+1. Implement opt-in, allowlisted, privacy-safe Trace v2 requested path(s), cwd semantics, correct mount project attribution, and lifecycle correlation, with tests and backward-compatible event structure.
+2. Design and implement **trustworthy Personal/SOOCKER ingress route attribution** within Core + associated transport configuration *if a verifiable mechanism can be constructed*. Investigate actual tunnel-client support and shared network namespace; reject caller-forged headers and untrusted source identifiers. If no defensible signal exists, keep `ingressSource: null`, document the blocker and recommended secure topology; never fake attribution or compromise authentication.
+3. Agree on the JSONL contract with the Console owner, including `traceSchemaVersion`, `path`, `sourcePath`, `destinationPath`, `cwd`, `pathKind`, `project`, `projectBasis`, `ingressSource`, and a **verified provenance marker** such as `ingressVerified: true` emitted only by trustworthy infrastructure. Emit `ingressSource: null` if not verified.
+4. Add unit, integration and privacy-regression tests, run existing Core gate, update Core docs, and prepare one Core PR. Include trace fixture examples (v1/v2, single/multiple paths, trusted/untrusted ingress) for Console integration.
+5. **Do not edit the MCP Console repo**; its owner will implement parser, persistence, UI and tests separately.
+6. **Do not restart/recreate live MCP or tunnels, deploy production, or merge main** before an explicit owner-reviewed integration window. Document the deployment change and rollback if ingress topology needs modification.
+
+Acceptance is **complete Core implementation and tests in one pass**, plus one later coordinated end-to-end verification with the separately developed Console. Real tunnel-route attribution is allowed to remain Unknown only when unsupported after evidence-based investigation; never present it as successfully implemented.
+
+**Codex task:** Read this full plan, honor the delivery override, complete all Core-side work and PR in one delivery, provide test evidence and the final Trace v2 contract. Core must remain independently deployable from Console.
+
+---
+
+
 - Date: 2026-10-22
 - Status: **Approved direction / pending Codex implementation**
 - Target repository: `cerjary/chatgpt-mcp` (public); implement on a feature branch and open a PR
