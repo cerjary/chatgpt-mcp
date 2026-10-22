@@ -3,13 +3,24 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import type { ChatGptMcpConfig } from './config.js';
 
-const context = new AsyncLocalStorage<{ requestId: string; transportSignal?: AbortSignal; signals: WeakMap<AbortSignal, AbortSignal> }>();
+const context = new AsyncLocalStorage<{ requestId: string; ingressSource?: 'Personal' | 'SOOCKER' | null; toolScope?: boolean; toolIds?: { issued: number }; transportSignal?: AbortSignal; signals: WeakMap<AbortSignal, AbortSignal> }>();
 const startedAt = new Date().toISOString();
 const fingerprints = new WeakMap<object, string>();
 export function diagnosticId(): string { return context.getStore()?.requestId ?? randomUUID(); }
-export function withDiagnosticRequest<T>(fn: () => T, transportSignal?: AbortSignal): T {
-  return context.run({ requestId: randomUUID(), signals: new WeakMap(), ...(transportSignal ? { transportSignal } : {}) }, fn);
+export function withDiagnosticRequest<T>(fn: () => T, transportSignal?: AbortSignal, ingressSource: 'Personal' | 'SOOCKER' | null = null): T {
+  return context.run({ requestId: randomUUID(), ingressSource, toolIds: { issued: 0 }, signals: new WeakMap(), ...(transportSignal ? { transportSignal } : {}) }, fn);
 }
+
+/** Each tool gets its own ID, including concurrent calls on one HTTP exchange. */
+export function withDiagnosticTool<T>(fn: () => T): T {
+  const parent = context.getStore();
+  // Preserve the existing HTTP/tool correlation for the first invocation; a
+  // batch or nested invocation must never reuse another tool's lifecycle ID.
+  const requestId = parent && !parent.toolScope && parent.toolIds && parent.toolIds.issued++ === 0
+    ? parent.requestId : randomUUID();
+  return context.run({ ...parent, requestId, toolScope: true, signals: parent?.signals ?? new WeakMap() }, fn);
+}
+export function diagnosticIngress(): 'Personal' | 'SOOCKER' | null { return context.getStore()?.ingressSource ?? null; }
 
 /** Keep cancellation attached to the native HTTP exchange, even when SDK
  * transports release intermediate Request/AbortSignal objects while streaming.
@@ -28,7 +39,8 @@ export function requestSignal(sdkSignal: AbortSignal): AbortSignal {
 /** Never include arguments, URLs, environment values, output, or arbitrary exception messages. */
 export function trace(event: string, fields: Record<string, string | number | boolean | null>): void {
   if (process.env.CHATGPT_MCP_TRACE !== '1') return;
-  console.error(JSON.stringify({ time: new Date().toISOString(), event, ...fields }));
+  const time = new Date().toISOString();
+  try { console.error(JSON.stringify({ time, ...(fields.traceSchemaVersion === 2 ? { timestamp: time } : {}), event, ...fields })); } catch { /* Diagnostics must not change tool outcomes. */ }
 }
 
 export function runtimeIdentity(config: Readonly<ChatGptMcpConfig>): Record<string, unknown> {

@@ -1,0 +1,27 @@
+# Required: existing approved Core runtime image with /app application layout.
+# This preserves its OS tools and configuration; never build over its live tag.
+ARG CORE_BASE_IMAGE=chatgpt-mcp-approved-runtime:required
+FROM node:22-bookworm AS build
+WORKDIR /build
+RUN corepack enable && corepack prepare pnpm@11.20.0 --activate
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY tsconfig.json ./
+COPY src ./src
+COPY test ./test
+RUN pnpm build
+
+FROM build AS verify
+COPY docs ./docs
+COPY scripts ./scripts
+COPY install.sh README.md SPEC.md config.example.json config.full.example.json ./
+CMD ["pnpm", "gate"]
+
+FROM build AS production-deps
+RUN pnpm prune --prod
+
+FROM ${CORE_BASE_IMAGE}
+COPY --from=build /build/package.json /app/package.json
+COPY --from=production-deps /build/node_modules /app/node_modules
+COPY --from=build /build/dist/src /app/dist/src
+# Deliberately inherit the runtime's user, workdir, entrypoint, command and healthcheck.

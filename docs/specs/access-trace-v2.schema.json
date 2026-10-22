@@ -1,0 +1,356 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/cerjary/chatgpt-mcp/blob/feat/core-access-trace-v2/docs/specs/access-trace-v2.schema.json",
+  "title": "MCP Core tool lifecycle Trace v2",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "event": {
+      "enum": [
+        "tool_received",
+        "tool_started",
+        "tool_completed",
+        "tool_failed"
+      ]
+    },
+    "traceSchemaVersion": {
+      "const": 2
+    },
+    "requestId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "operation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 96
+    },
+    "path": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "sourcePath": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "destinationPath": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "cwd": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "project": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "sourceProject": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "destinationProject": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "pathKind": {
+      "enum": [
+        "requested",
+        "cwd",
+        null
+      ]
+    },
+    "projectBasis": {
+      "enum": [
+        "requested_mount_path",
+        "cwd_only",
+        "multiple",
+        "unknown"
+      ]
+    },
+    "ingressSource": {
+      "enum": [
+        "Personal",
+        "SOOCKER",
+        null
+      ]
+    },
+    "ingressVerified": {
+      "type": "boolean"
+    },
+    "success": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "elapsedMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "errorCode": {
+      "enum": [
+        "CAPABILITY_DISABLED",
+        "PATH_NOT_ALLOWED",
+        "COMMAND_NOT_ALLOWED",
+        "INVALID_INPUT",
+        "NOT_FOUND",
+        "TIMEOUT",
+        "OUTPUT_LIMIT",
+        "OVERLOADED",
+        "CANCELLED",
+        "OS_ERROR",
+        "CONFLICT",
+        "OUTCOME_UNKNOWN",
+        null
+      ]
+    },
+    "code": {
+      "enum": [
+        "CAPABILITY_DISABLED",
+        "PATH_NOT_ALLOWED",
+        "COMMAND_NOT_ALLOWED",
+        "INVALID_INPUT",
+        "NOT_FOUND",
+        "TIMEOUT",
+        "OUTPUT_LIMIT",
+        "OVERLOADED",
+        "CANCELLED",
+        "OS_ERROR",
+        "CONFLICT",
+        "OUTCOME_UNKNOWN"
+      ]
+    }
+  },
+  "required": [
+    "time",
+    "timestamp",
+    "event",
+    "traceSchemaVersion",
+    "requestId",
+    "operation",
+    "path",
+    "sourcePath",
+    "destinationPath",
+    "cwd",
+    "project",
+    "sourceProject",
+    "destinationProject",
+    "pathKind",
+    "projectBasis",
+    "ingressSource",
+    "ingressVerified",
+    "success",
+    "elapsedMs",
+    "errorCode"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ingressVerified": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "ingressSource": {
+            "enum": [
+              "Personal",
+              "SOOCKER"
+            ]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "ingressSource": {
+            "const": null
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "tool_failed"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "success": {
+            "const": false
+          },
+          "errorCode": {
+            "enum": [
+              "CAPABILITY_DISABLED",
+              "PATH_NOT_ALLOWED",
+              "COMMAND_NOT_ALLOWED",
+              "INVALID_INPUT",
+              "NOT_FOUND",
+              "TIMEOUT",
+              "OUTPUT_LIMIT",
+              "OVERLOADED",
+              "CANCELLED",
+              "OS_ERROR",
+              "CONFLICT",
+              "OUTCOME_UNKNOWN"
+            ]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "errorCode": {
+            "const": null
+          }
+        },
+        "not": {
+          "required": [
+            "code"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "tool_completed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "success": {
+            "const": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "enum": [
+              "tool_received",
+              "tool_started"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "success": {
+            "const": null
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "pathKind": {
+            "const": "cwd"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "path": {
+            "const": null
+          },
+          "sourcePath": {
+            "const": null
+          },
+          "destinationPath": {
+            "const": null
+          },
+          "cwd": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "projectBasis": {
+            "enum": [
+              "multiple",
+              "unknown"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "project": {
+            "const": null
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "projectBasis": {
+            "enum": [
+              "requested_mount_path",
+              "cwd_only"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "project": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ]
+}
